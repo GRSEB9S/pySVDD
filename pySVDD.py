@@ -36,9 +36,8 @@ class SVDD:
 		# Find coefficients and support vectors
 		P, q, G, h, A, b = self.build_qp(X, y)
 		self.beta = y*self.quadprog_solve_qp(self._nearestPD(P), q, G, h, A, b)
-		self.beta[abs(self.beta) < 1e-12] = 0
-		self.sv = self.X[abs(self.beta) > 0,:]
-		self.beta = self.beta[abs(self.beta) > 0]
+		self.sv = self.X[abs(self.beta) > 1e-6,:]
+		self.beta = self.beta[abs(self.beta) > 1e-6]
 		
 		# Find decision threshold
 		R2 = np.zeros(self.beta.shape)
@@ -48,9 +47,13 @@ class SVDD:
 		
 		return self
 	
-	def predict(self,x):
-		y = sign(self.radius(x) - self.threshold).astype('int')
+	def predict(self, X):
+		y = np.sign(self.threshold - self.radius(X) ).astype('int')
+		y[y == 0] = 1
 		return y
+	
+	def decision_function(self, X):
+		return self.radius(X) - self.threshold
 		
 	def radius(self, z):
 		kap = 0
@@ -71,7 +74,10 @@ class SVDD:
 		return R2#, dR2
 		
 	def rbf_kernel(self, x, z):
-		K = np.exp(-self.gamma*np.linalg.norm(x - z)**2)
+		if z.ndim > 1:
+			K = np.exp(-self.gamma*np.linalg.norm(x - z, axis = 1)**2)
+		else:
+			K = np.exp(-self.gamma*np.linalg.norm(x - z)**2)
 		#dK = 2*self.gamma*(x - z)*np.exp(-self.gamma*np.linalg.norm(x - z)**2)
 		
 		return K#, dK
@@ -143,7 +149,8 @@ class SVDD:
 		return quadprog.solve_qp(qp_G, qp_a, qp_C, qp_b, meq)[0]
 	
 	def _nearestPD(self, A):
-		"""Find the nearest positive-definite matrix to input
+		"""
+		Find the nearest positive-definite matrix to input
 	
 		A Python/Numpy port of John D'Errico's `nearestSPD` MATLAB code [1], which
 		credits [2].
