@@ -1,5 +1,4 @@
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
 import quadprog
 
 class SVDD:
@@ -29,31 +28,27 @@ class SVDD:
 			Returns self.
 		"""
 		
-		self.scaler = MinMaxScaler()
-		self.X = X
-		self.y = y
-		
 		# Find coefficients and support vectors
 		P, q, G, h, A, b = self.build_qp(X, y)
 		self.beta = y*self.quadprog_solve_qp(self._nearestPD(P), q, G, h, A, b)
-		self.sv = self.X[abs(self.beta) > 1e-6,:]
+		self.sv = X[abs(self.beta) > 1e-6,:]
+		self.support_ = np.squeeze(np.where(abs(self.beta) > 1e-6))
 		self.beta = self.beta[abs(self.beta) > 1e-6]
 		
 		# Find decision threshold
-		R2 = np.zeros(self.beta.shape)
-		for i in range(len(self.beta)):
-			R2[i] = self.radius(self.sv[i,:])
+		R2, _ = self.radius(self.sv)
 		self.threshold = np.mean(R2)
 		
 		return self
 	
 	def predict(self, X):
-		y = np.sign(self.threshold - self.radius(X) ).astype('int')
+		y = np.sign(self.decision_function(X)).astype('int')
 		y[y == 0] = 1
 		return y
 	
 	def decision_function(self, X):
-		return self.radius(X) - self.threshold
+		radius, _ = self.radius(X)
+		return self.threshold - radius
 		
 	def radius(self, z):
 		kap = 0
@@ -61,26 +56,28 @@ class SVDD:
 		mu = 0
 		
 		for i in range(len(self.beta)):
-			Kxz = self.rbf_kernel(self.sv[i,:], z)
+			Kxz, dKxz = self.rbf_kernel(self.sv[i,:], z)
 			kap = kap + self.beta[i]*Kxz
-			#mu = mu + self.beta[i]*dKxz
+			mu = mu + self.beta[i]*dKxz
 			for j in range(len(self.beta)):
-				Kxx = self.rbf_kernel(self.sv[i,:], self.sv[j,:])
+				Kxx, _ = self.rbf_kernel(self.sv[i,:], self.sv[j,:])
 				lam = lam + self.beta[i]*self.beta[j]*Kxx
 				
 		R2 = 1 - 2*kap + lam
-		#dR2 = -2*mu
+		dR2 = -2*mu
 		
-		return R2#, dR2
+		return R2, dR2
 		
 	def rbf_kernel(self, x, z):
 		if z.ndim > 1:
 			K = np.exp(-self.gamma*np.linalg.norm(x - z, axis = 1)**2)
+			#dK = 2*self.gamma*(x - z)*np.exp(-self.gamma*np.linalg.norm(x - z, axis = 1)**2)
+			dK = np.dot(np.diag(np.exp(-self.gamma*np.linalg.norm(x - z, axis = 1)**2)), 2*self.gamma*(x - z))
 		else:
 			K = np.exp(-self.gamma*np.linalg.norm(x - z)**2)
-		#dK = 2*self.gamma*(x - z)*np.exp(-self.gamma*np.linalg.norm(x - z)**2)
+			dK = 2*self.gamma*(x - z)*np.exp(-self.gamma*np.linalg.norm(x - z)**2)
 		
-		return K#, dK
+		return K, dK
 		
 	def build_qp(self, X, y):
 		
@@ -88,8 +85,9 @@ class SVDD:
 		P = np.eye(len(y))
 		for i in range(len(y) - 1):
 			for j in range(i + 1, len(y)):
-				P[i,j] = y[i]*y[j]*self.rbf_kernel(X[i,:],X[j,:])
-		P = P + P.T - np.eye(len(y))
+				Kxx, _ = self.rbf_kernel(X[i,:],X[j,:])
+				P[i,j] = y[i]*y[j]*Kxx
+		P = self._nearestPD(P + P.T - np.eye(len(y)))
 		
 		# Build q
 		q = np.zeros(len(y))
