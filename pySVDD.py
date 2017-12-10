@@ -2,20 +2,30 @@ import numpy as np
 import quadprog
 
 class SVDD:
-	def __init__(self, C, gamma):
-		self.C = C
-		self.gamma = gamma
+	def __init__(self, C = 0.01, gamma = 3.):
+		"""
+		Initialize SVDD with Gaussian kernel function
 		
-	def fit(self, X, y):
+		Parameters
+		----------
+		C : scalar
+			SVDD allowable error constraint bound
+		gamma : scalar
+			Kernel function parameter
+		"""
+		self.C_ = C
+		self.gamma_ = gamma
+		
+	def fit(self, X, y, sample_weight = None):
 		"""
 		Fit the model according to the given training data.
 		
 		Parameters
 		----------
-		X : {array-like, sparse matrix}, shape = [n_samples, n_features]
+		X : array-like, shape = [n_samples, n_features]
 			Training vector, where n_samples in the number of samples and
 			n_features is the number of features.
-		y : array-like, shape = [n_samples], optional
+		y : array-like, shape = [n_samples]
 			Target vector relative to X
 		sample_weight : array-like, shape = [n_samples], optional
 			Array of weights that are assigned to individual
@@ -27,65 +37,146 @@ class SVDD:
 		self : object
 			Returns self.
 		"""
-		
 		# Find coefficients and support vectors
-		P, q, G, h, A, b = self.build_qp(X, y)
-		self.beta = y*self.quadprog_solve_qp(self._nearestPD(P), q, G, h, A, b)
-		self.sv = X[abs(self.beta) > 1e-6,:]
-		self.support_ = np.squeeze(np.where(abs(self.beta) > 1e-6))
-		self.beta = self.beta[abs(self.beta) > 1e-6]
+		P, q, G, h, A, b = self._build_qp(X, y)
+		beta = y*self._quadprog_solve_qp(self._nearestPD(P), q, G, h, A, b)
+		self.support_vectors_ = X[abs(beta) > 1e-6,:]
+		self.support_ = np.squeeze(np.where(abs(beta) > 1e-6))
+		self.dual_coef_ = beta[abs(beta) > 1e-6]
 		
 		# Find decision threshold
-		R2, _ = self.radius(self.sv)
-		self.threshold = np.mean(R2)
+		R2, _ = self._radius(self.support_vectors_)
+		self.threshold_ = np.mean(R2)
 		
 		return self
 	
 	def predict(self, X):
+		"""
+		Predict data classification
+		
+		Parameters
+		----------
+		X : array-like, shape = [n_samples, n_features]
+			Test vector, where n_samples in the number of samples and
+			n_features is the number of features.
+			
+		Returns
+		-------
+		y : array-like, shape = [n_samples]
+			Target vector relative to X
+		"""
 		y = np.sign(self.decision_function(X)).astype('int')
-		y[y == 0] = 1
+		y[y == 0] = 1 # If data is on the threshold boundary, include it in the SVDD
 		return y
 	
 	def decision_function(self, X):
-		radius, _ = self.radius(X)
-		return self.threshold - radius
+		"""
+		Test point radial difference from decision threshold.  Negative
+		difference means test point is outside SVDD.
 		
-	def radius(self, z):
+		Parameters
+		----------
+		X : array-like, shape = [n_samples, n_features]
+			Data vector, where n_samples in the number of samples and
+			n_features is the number of features.
+			
+		Returns
+		-------
+		scalar shape = [n_samples]
+			Radial difference from decision threshold
+		"""
+		radius, _ = self._radius(X)
+		return self.threshold_ - radius
+		
+	def _radius(self, X):
+		"""
+		Test data hypersphere radii
+		
+		Parameters
+		----------
+		X : array-like, shape = [n_samples, n_features]
+			Data vector, where n_samples in the number of samples and
+			n_features is the number of features.
+			
+		Returns
+		-------
+		R2 : array-like, shape = [n_samples]
+			Hypersphere radius for each sample
+		dR2 : array-like, shape = [n_samples]
+			Hypersphere derivative evaluated at each sample
+		"""
 		kap = 0
 		lam = 0
 		mu = 0
 		
-		for i in range(len(self.beta)):
-			Kxz, dKxz = self.rbf_kernel(self.sv[i,:], z)
-			kap = kap + self.beta[i]*Kxz
-			mu = mu + self.beta[i]*dKxz
-			for j in range(len(self.beta)):
-				Kxx, _ = self.rbf_kernel(self.sv[i,:], self.sv[j,:])
-				lam = lam + self.beta[i]*self.beta[j]*Kxx
+		for i in range(len(self.dual_coef_)):
+			Kxz, dKxz = self._rbf_kernel(self.support_vectors_[i,:], X)
+			kap = kap + self.dual_coef_[i]*Kxz
+			mu = mu + self.dual_coef_[i]*dKxz
+			for j in range(len(self.dual_coef_)):
+				Kxx, _ = self._rbf_kernel(self.support_vectors_[i,:], self.support_vectors_[j,:])
+				lam = lam + self.dual_coef_[i]*self.dual_coef_[j]*Kxx
 				
 		R2 = 1 - 2*kap + lam
 		dR2 = -2*mu
 		
 		return R2, dR2
 		
-	def rbf_kernel(self, x, z):
+	def _rbf_kernel(self, x, z):
+		"""
+		Gaussian (Radial Bias Function) kernel function
+		
+		Parameters
+		----------
+		x : array-like, shape = [n_features]
+			Data point vector
+		z : array-like, shape = [n_samples, n_features]
+			Data vector, where n_samples in the number of samples and
+			n_features is the number of features.
+			
+		Returns
+		-------
+		K : array-like, shape = [n_samples]
+			Kernel for each sample
+		dK2 : array-like, shape = [n_samples]
+			Kernel derivative evaluated at each sample
+		"""
 		if z.ndim > 1:
-			K = np.exp(-self.gamma*np.linalg.norm(x - z, axis = 1)**2)
+			K = np.exp(-self.gamma_*np.linalg.norm(x - z, axis = 1)**2)
 			#dK = 2*self.gamma*(x - z)*np.exp(-self.gamma*np.linalg.norm(x - z, axis = 1)**2)
-			dK = np.dot(np.diag(np.exp(-self.gamma*np.linalg.norm(x - z, axis = 1)**2)), 2*self.gamma*(x - z))
+			dK = np.dot(np.diag(np.exp(-self.gamma_*np.linalg.norm(x - z, axis = 1)**2)), 2*self.gamma_*(x - z))
 		else:
-			K = np.exp(-self.gamma*np.linalg.norm(x - z)**2)
-			dK = 2*self.gamma*(x - z)*np.exp(-self.gamma*np.linalg.norm(x - z)**2)
+			K = np.exp(-self.gamma_*np.linalg.norm(x - z)**2)
+			dK = 2*self.gamma_*(x - z)*np.exp(-self.gamma_*np.linalg.norm(x - z)**2)
 		
 		return K, dK
 		
-	def build_qp(self, X, y):
+	def _build_qp(self, X, y):
+		"""
+		Construct quadratic programming elements
 		
+		Parameters
+		----------
+		X : array-like, shape = [n_samples, n_features]
+			Data vector, where n_samples in the number of samples and
+			n_features is the number of features.
+		y : array-like, shape = [n_samples]
+			Target vector relative to X
+			
+		Returns
+		-------
+		P : array-like, shape = [n_samples, n_samples]
+		q : array-like, shape = [n_samples]
+		G : array-like, shape = [n_constraints, n_samples]
+		h : array-like, shape = [n_constraints]
+		A : array-like, shape = [n_constraints, n_samples]
+		b : array-like, shape = [n_constraints]
+		"""
 		# Build P
 		P = np.eye(len(y))
 		for i in range(len(y) - 1):
 			for j in range(i + 1, len(y)):
-				Kxx, _ = self.rbf_kernel(X[i,:],X[j,:])
+				Kxx, _ = self._rbf_kernel(X[i,:],X[j,:])
 				P[i,j] = y[i]*y[j]*Kxx
 		P = self._nearestPD(P + P.T - np.eye(len(y)))
 		
@@ -96,7 +187,7 @@ class SVDD:
 		G = np.vstack((-np.eye(len(y)),np.eye(len(y))))
 		
 		# Build h
-		h = np.hstack((np.zeros(len(y)),self.C*np.ones(len(y))))
+		h = np.hstack((np.zeros(len(y)),self.C_*np.ones(len(y))))
 		
 		# Build A
 		A = y
@@ -106,7 +197,7 @@ class SVDD:
 		
 		return P, q, G, h, A, b
 	
-	def quadprog_solve_qp(self, P, q, G=None, h=None, A=None, b=None):
+	def _quadprog_solve_qp(self, P, q, G = None, h = None, A = None, b = None):
 		"""
 		Quadratic programming solver interface.  Solves the following:
 		
@@ -119,19 +210,17 @@ class SVDD:
 		
 		Parameters
 		----------
-		P : array-like, shape = [n_samples,n_samples]
-			Lower bound for bisection search
-		q : number
-			Label for lower bound
-		G : array-like, shape = [n_,n_samples]
-			Upper bound for bisection search
-		h : number
-			Label for upper bound
+		P : array-like, shape = [n_samples, n_samples]
+		q : array-like, shape = [n_samples]
+		G : array-like, shape = [n_constraints, n_samples]
+		h : array-like, shape = [n_constraints]
+		A : array-like, shape = [n_constraints, n_samples]
+		b : array-like, shape = [n_constraints]
 			
 		Returns
 		-------
-		self : object
-			Returns self.
+		array-like, shape = [n_samples]
+			QP solution x
 		"""
 		qp_G = .5 * (P + P.T)   # make sure P is symmetric
 		qp_a = -q
